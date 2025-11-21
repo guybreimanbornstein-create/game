@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Roll-a-Ball V2</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas { display: block; }
+        
+        /* UI Elements */
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            font-size: 24px;
+            text-shadow: 2px 2px 4px #000;
+        }
+        #message {
+            position: absolute;
+            top: 60px;
+            left: 20px;
+            color: #ffff00;
+            font-size: 20px;
+            text-shadow: 2px 2px 4px #000;
+        }
+
+        /* Game Over / Win Screen */
+        #game-over {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            text-align: center;
+            color: white;
+        }
+        #game-over h2 {
+            font-size: 4em;
+            margin: 0;
+        }
+        #game-over button {
+            font-size: 1.5em;
+            padding: 10px 20px;
+            background-color: #f0f0f0;
+            border: none;
+            cursor: pointer;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    
+    <div id="ui">Level: <span id="level">1</span></div>
+    <div id="message">Find the spinning coin! (Space = Jump)</div>
+
+    <div id="game-over" class="hidden">
+        <h2 id="game-over-title">GAME OVER</h2>
+        <p id="game-over-message">You fell off the platform!</p>
+        <button onclick="restartGame()">Try Again</button>
+    </div>
+
+    <!-- 
+      This is the JavaScript (The Brains)
+      We must import the Three.js library from a CDN
+    -->
+    <script type="module">
+        // --- 1. IMPORT THREE.JS ---
+        import * as THREE from 'https://cdn.skypack.dev/three@0.132.2/build/three.module.js';
+
+        // --- 2. BASIC WORLD SETUP ---
+        let scene, camera, renderer;
+        let player, goal, exit;
+        let platforms = [];
+        let movingPlatforms = []; // NEW
+        let keysPressed = {};
+        let level = 1;
+        let isGameOver = false;
+        
+        // --- Player Physics State (Tuned for better control) ---
+        let playerState = {
+            velocity: new THREE.Vector3(0, 0, 0),
+            onGround: false,
+            canJump: false,
+            hasCoin: false,
+            acceleration: 0.03, // Slower acceleration
+            drag: 0.95,        // More drag
+            gravity: 0.015,     // Less gravity
+            maxSpeed: 0.4,       // Slower max speed
+            jumpForce: 0.3       // NEW jump force
+        };
+
+        // --- DOM Elements ---
+        const levelUI = document.getElementById('level');
+        const messageUI = document.getElementById('message');
+        const gameOverUI = document.getElementById('game-over');
+        const gameOverTitle = document.getElementById('game-over-title');
+        const gameOverMessage = document.getElementById('game-over-message');
+        
+        // --- 3. INITIALIZATION ---
+        function init() {
+            isGameOver = false;
+            playerState.hasCoin = false;
+            
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x220044); // Dark purple void
+            scene.fog = new THREE.Fog(0x220044, 100, 300);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            if (document.body.getElementsByTagName('canvas').length > 0) {
+                 document.body.replaceChild(renderer.domElement, document.body.getElementsByTagName('canvas')[0]);
+            } else {
+                 document.body.appendChild(renderer.domElement);
+            }
+
+            // --- Lights ---
+            scene.add(new THREE.AmbientLight(0x666666));
+            const light = new THREE.DirectionalLight(0xffffff, 1);
+            light.position.set(20, 50, 20);
+            light.castShadow = true;
+            light.shadow.mapSize.width = 1024;
+            light.shadow.mapSize.height = 1024;
+            scene.add(light);
+
+            // --- Create Player ---
+            if (!player) {
+                const playerGeo = new THREE.SphereGeometry(1, 32, 32);
+                const playerMat = new THREE.MeshStandardMaterial({ color: 0x0099ff });
+                player = new THREE.Mesh(playerGeo, playerMat);
+                player.castShadow = true;
+            }
+            scene.add(player);
+
+            // --- Create Goal ---
+            if (!goal) {
+                const goalGeo = new THREE.CylinderGeometry(1.5, 1.5, 0.5, 32);
+                const goalMat = new THREE.MeshStandardMaterial({ color: 0xffff00 });
+                goal = new THREE.Mesh(goalGeo, goalMat);
+                goal.castShadow = true;
+            }
+            scene.add(goal);
+            
+            // --- Create Exit ---
+            if (!exit) {
+                const exitGeo = new THREE.BoxGeometry(3, 5, 1);
+                const exitMat = new THREE.MeshStandardMaterial({ 
+                    color: 0x00ff00, 
+                    transparent: true, 
+                    opacity: 0.5 
+                });
+                exit = new THREE.Mesh(exitGeo, exitMat);
+                exit.receiveShadow = true;
+            }
+            scene.add(exit);
+
+            // --- Build Level ---
+            buildLevel(level);
+
+            // --- UI & Controls ---
+            levelUI.textContent = level;
+            messageUI.textContent = "Find the coin! (Space = Jump)";
+            gameOverUI.classList.add('hidden');
+            
+            // Start Game Loop
+            animate();
+        }
+
+        // --- 4. LEVEL BUILDING ---
+        function buildLevel(levelNum) {
+            // Clear old platforms from scene
+            platforms.forEach(p => scene.remove(p));
+            platforms = [];
+            movingPlatforms.forEach(p => scene.remove(p.mesh));
+            movingPlatforms = [];
+
+            // [x, y, z, width, depth]
+            let layout = [];
+            
+            if (levelNum === 1) {
+                layout = [
+                    [0, 0, 0, 10, 20],   // Start
+                    [0, 0, 25, 10, 10],
+                    [15, 0, 25, 10, 10], // Jump
+                    [30, 0, 25, 10, 20],
+                    [30, 0, 0, 10, 10],
+                ];
+                player.position.set(0, 2, 0);
+                goal.position.set(30, 2, 0);
+                exit.position.set(0, 2, -5);
+            } else if (levelNum === 2) {
+                layout = [
+                    [0, 0, 0, 10, 10],   // Start
+                    [0, 0, 15, 30, 10],  // Long path
+                    [0, 0, 30, 10, 10],
+                    [-15, -2, 30, 10, 10], // Jump down
+                    [-30, -2, 30, 10, 10],
+                    [-30, -2, 15, 10, 10],
+                    [-30, -2, 0, 10, 10],
+                ];
+                player.position.set(0, 2, 0);
+                goal.position.set(-30, 0, 0);
+                exit.position.set(0, 2, -5);
+            } else if (levelNum === 3) {
+                layout = [
+                    [0, 0, 0, 10, 10],   // Start
+                    [0, 0, 15, 10, 10],  // Jump
+                    // Gap for moving platform
+                    [0, 0, 45, 10, 10],
+                    [0, 0, 60, 10, 10],
+                    [-15, 0, 60, 10, 10],
+                    // Gap for moving platform
+                    [-45, 0, 60, 10, 10],
+                    [-45, 0, 45, 10, 10],
+                    [-45, 0, 30, 10, 10],
+                ];
+                player.position.set(0, 2, 0);
+                goal.position.set(-45, 2, 30);
+                exit.position.set(0, 2, -5);
+
+                // Add moving platforms
+                createMovingPlatform(
+                    new THREE.Vector3(0, 0, 30),  // start
+                    new THREE.Vector3(15, 0, 30), // end
+                    new THREE.Vector3(8, 1, 8),   // size
+                    0.05                          // speed
+                );
+                createMovingPlatform(
+                    new THREE.Vector3(-30, 0, 60),
+                    new THREE.Vector3(-30, 0, 45),
+                    new THREE.Vector3(8, 1, 8),
+                    0.03
+                );
+            } else if (levelNum > 3) {
+                // You Win!
+                endGame(true, "YOU WIN!", "You beat all the levels!");
+                return;
+            }
+            
+            playerState.velocity.set(0, 0, 0);
+            
+            // Create static platform meshes
+            const platformMat = new THREE.MeshStandardMaterial({ color: 0x888888 });
+            layout.forEach(p => {
+                const geo = new THREE.BoxGeometry(p[3], 1, p[4]); // w, h, d
+                const platform = new THREE.Mesh(geo, platformMat);
+                platform.position.set(p[0], p[1], p[2]); // x, y, z
+                platform.receiveShadow = true;
+                scene.add(platform);
+                platforms.push(platform);
+            });
+            
+            goal.visible = true;
+            exit.visible = false; // Hide exit
+        }
+        
+        // NEW Function to create moving platforms
+        function createMovingPlatform(start, end, size, speed) {
+            const geo = new THREE.BoxGeometry(size.x, size.y, size.z);
+            const mat = new THREE.MeshStandardMaterial({ color: 0xcc00ff }); // Purple
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.position.copy(start);
+            scene.add(mesh);
+
+            const velocity = new THREE.Vector3().subVectors(end, start).normalize().multiplyScalar(speed);
+
+            movingPlatforms.push({
+                mesh: mesh,
+                start: start.clone(),
+                end: end.clone(),
+                velocity: velocity,
+            });
+        }
+
+        // --- 5. INPUT HANDLING ---
+        document.addEventListener('keydown', (e) => { 
+            keysPressed[e.key.toLowerCase()] = true; 
+            // Handle Jump
+            if ((e.key === ' ' || e.key.toLowerCase() === 'j') && playerState.canJump) {
+                playerState.velocity.y = playerState.jumpForce;
+                playerState.canJump = false; // Prevent double-jump in mid-air
+            }
+        });
+        document.addEventListener('keyup', (e) => { keysPressed[e.key.toLowerCase()] = false; });
+        
+        // This makes restartGame function available to the button
+        window.restartGame = () => {
+            level = 1;
+            init();
+        }
+        
+        // NEW Helper function for collision
+        function isPlayerOnPlatform(platform) {
+            // Player's bottom is at position.y - radius (1.0)
+            const playerBottom = player.position.y - 1.0;
+            // Platform's top is at position.y + half-height (0.5)
+            const platformTop = platform.position.y + 0.5;
+            
+            // Bounding box for platform
+            const platBox = new THREE.Box3().setFromObject(platform);
+            
+            // Check if player XZ is within platform XZ
+            const isHorizontallyAligned = player.position.x >= platBox.min.x && player.position.x <= platBox.max.x &&
+                                         player.position.z >= platBox.min.z && player.position.z <= platBox.max.z;
+            
+            // Check if player is standing on top (within a small tolerance)
+            const isVerticallyAligned = (playerBottom >= (platformTop - 0.1)) && (playerBottom <= (platformTop + 0.2));
+
+            return isHorizontallyAligned && isVerticallyAligned;
+        }
+
+        // --- 6. GAME LOOP (60x per second) ---
+        function animate() {
+            if (isGameOver) return;
+            
+            requestAnimationFrame(animate);
+
+            // --- 6a. Handle Input ---
+            let force = new THREE.Vector3(0, 0, 0);
+            if (keysPressed['arrowup'] || keysPressed['w']) force.z -= playerState.acceleration;
+            if (keysPressed['arrowdown'] || keysPressed['s']) force.z += playerState.acceleration;
+            if (keysPressed['arrowleft'] || keysPressed['a']) force.x -= playerState.acceleration;
+            if (keysPressed['arrowright'] || keysPressed['d']) force.x += playerState.acceleration;
+
+            // --- 6b. Update Player Physics ---
+            playerState.velocity.add(force); // Apply force
+            
+            // Apply horizontal drag (only if not accelerating)
+            if (force.lengthSq() === 0) {
+                 playerState.velocity.x *= playerState.drag;
+                 playerState.velocity.z *= playerState.drag;
+            }
+            
+            // Apply Gravity
+            playerState.velocity.y -= playerState.gravity; 
+            
+            // Clamp horizontal speed
+            let horizontalVel = new THREE.Vector3(playerState.velocity.x, 0, playerState.velocity.z);
+            if (horizontalVel.length() > playerState.maxSpeed) {
+                horizontalVel.normalize().multiplyScalar(playerState.maxSpeed);
+                playerState.velocity.x = horizontalVel.x;
+                playerState.velocity.z = horizontalVel.z;
+            }
+            
+            // Move player
+            player.position.add(playerState.velocity);
+
+            // --- 6c. Check Collisions ---
+            playerState.onGround = false; // Reset this every frame
+            
+            const allPlatforms = [...platforms, ...movingPlatforms.map(p => p.mesh)];
+            
+            for(let platform of allPlatforms) {
+                if (isPlayerOnPlatform(platform)) {
+                    playerState.onGround = true;
+                    playerState.canJump = true; // Allow jumping
+                    playerState.velocity.y = 0; 
+                    player.position.y = platform.position.y + 0.5 + 1; // platform top + player radius
+                }
+            }
+            
+            // --- 6d. Move Platforms ---
+            movingPlatforms.forEach(plat => {
+                // Move platform
+                plat.mesh.position.add(plat.velocity);
+                
+                // Check if player is on this platform, if so, move player
+                if (isPlayerOnPlatform(plat.mesh)) {
+                    player.position.add(plat.velocity);
+                }
+                
+                // Check if platform reached end
+                const totalDist = plat.start.distanceTo(plat.end);
+                const currentDist = plat.start.distanceTo(plat.mesh.position);
+                
+                if (currentDist >= totalDist) {
+                    // Reached end, swap start/end and reverse velocity
+                    let tempStart = plat.start;
+                    plat.start = plat.end;
+                    plat.end = tempStart;
+                    plat.velocity.negate();
+                }
+            });
+
+            // --- 6e. Check Game State ---
+            
+            // Check falling off world
+            if (player.position.y < -50) {
+                endGame(false, "GAME OVER", "You fell off the platform!");
+            }
+            
+            // Check goal collision
+            if (!playerState.hasCoin && player.position.distanceTo(goal.position) < 2) {
+                playerState.hasCoin = true;
+                goal.visible = false; // Hide coin
+                exit.visible = true; // Show exit
+                messageUI.textContent = "Go to the green exit portal! (Space = Jump)";
+            }
+            
+            // Check exit collision
+            if (playerState.hasCoin && player.position.distanceTo(exit.position) < 2) {
+                level++;
+                buildLevel(level); // Load next level
+            }
+
+            // --- 6f. Animate Objects ---
+            goal.rotation.y += 0.05; // Spin the coin
+
+            // --- 6g. Update Camera ---
+            // Follow player from a fixed offset
+            const cameraOffset = new THREE.Vector3(0, 15, 20);
+            let cameraPosition = new THREE.Vector3().copy(player.position).add(cameraOffset);
+            
+            // Smoothly move camera
+            camera.position.lerp(cameraPosition, 0.1); 
+            camera.lookAt(player.position); // Always look at the player
+            
+            // --- 6h. Render ---
+            renderer.render(scene, camera);
+        }
+        
+        // --- 7. GAME STATE FUNCTIONS ---
+        function endGame(isWin, title, message) {
+            isGameOver = true;
+            gameOverUI.classList.remove('hidden');
+            gameOverTitle.textContent = title;
+            gameOverMessage.textContent = message;
+            
+            if (isWin) {
+                gameOverTitle.style.color = "#00ff00";
+            } else {
+                gameOverTitle.style.color = "#ff3300";
+            }
+        }
+        
+        // --- 8. Handle Window Resizing ---
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }, false);
+
+        // --- 9. START THE GAME! ---
+        init();
+    </script>
+</body>
+</html>
